@@ -1,7 +1,6 @@
 import {
   DEFAULT_DISTANCE,
   isHorizontalSequenceFlow,
-  computeGap,
   computeDelta,
   sortFlowsLeftToRight
 } from './util.mjs';
@@ -22,15 +21,12 @@ export default class FlowNormalizerProvider {
     this._editorActions = editorActions;
     this._eventBus = eventBus;
 
-    // Register editor action
     editorActions.register('normalizeHorizontalFlows', () => {
       this.normalizeAll();
     });
 
-    // Register as context pad provider
     contextPad.registerProvider(PROVIDER_PRIORITY, this);
 
-    // Listen for normalize events with optional scope
     eventBus.on('flowNormalizer.normalize', (event) => {
       if (event.scope) {
         this.normalizeFromElement(event.scope, event.distance);
@@ -79,7 +75,6 @@ export default class FlowNormalizerProvider {
   }
 
   _normalizeFlows(flows, targetDistance) {
-    // Filter: must have source, target, exactly 2 waypoints, target not a BoundaryEvent
     const eligible = flows.filter(flow => {
       if (!flow.source || !flow.target) return false;
       if (!flow.waypoints || flow.waypoints.length !== 2) return false;
@@ -88,16 +83,35 @@ export default class FlowNormalizerProvider {
     });
 
     const sorted = sortFlowsLeftToRight(eligible);
-    let count = 0;
+
+    // Phase 1: Berechne alle Deltas vorher (bevor irgendwas verschoben wird)
+    const moves = [];
+    const cumulativeShift = new Map(); // elementId -> accumulated X shift
 
     for (const flow of sorted) {
-      const gap = computeGap(flow.source, flow.target);
-      const delta = computeDelta(gap, targetDistance);
+      const source = flow.source;
+      const target = flow.target;
+
+      // Beruecksichtige bereits geplante Verschiebungen
+      const sourceShift = cumulativeShift.get(source.id) || 0;
+      const targetShift = cumulativeShift.get(target.id) || 0;
+
+      const effectiveSourceRight = source.x + source.width + sourceShift;
+      const effectiveTargetLeft = target.x + targetShift;
+      const currentGap = effectiveTargetLeft - effectiveSourceRight;
+      const delta = computeDelta(currentGap, targetDistance);
 
       if (Math.abs(delta) >= 1) {
-        this._modeling.moveElements([flow.target], { x: delta, y: 0 });
-        count++;
+        moves.push({ flow, target, delta });
+        cumulativeShift.set(target.id, targetShift + delta);
       }
+    }
+
+    // Phase 2: Alle Moves ausfuehren
+    let count = 0;
+    for (const { target, delta } of moves) {
+      this._modeling.moveElements([target], { x: delta, y: 0 });
+      count++;
     }
 
     this._eventBus.fire('flowNormalizer.done', {
